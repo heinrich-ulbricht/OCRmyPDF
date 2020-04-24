@@ -480,6 +480,11 @@ advanced.add_argument(
     "which do not benefit. If the threshold is 0 it will be apply to all files. "
     "Set the threshold very high to disable.",
 )
+advanced.add_argument(
+    '--user-script-jpg-to-1bpp-tif',
+    metavar='FILE',
+    help="Location of a script that converts JPEG images to 1 bpp TIF files. Those TIF files will be post-processed and embedded into the final PDF. Note that this is done _after_ OCRing the original images.",
+)
 
 debugging = parser.add_argument_group(
     "Debugging", "Arguments to help with troubleshooting and debugging"

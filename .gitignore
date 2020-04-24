@@ -8,6 +8,7 @@
 *.sublime-*
 *.DS_Store
 .mypy_cache/
+pyvenv.cfg
 
 # Package building
 .eggs/
@@ -23,6 +24,9 @@ docs/_static/
 docs/_templates/
 docs/Makefile
 ocrmypdf/lib/_*.py
+lib/
+lib64/
+bin/
 
 # Code coverage
 .coverage*
