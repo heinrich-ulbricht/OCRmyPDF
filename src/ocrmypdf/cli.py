@@ -485,6 +485,12 @@ advanced.add_argument(
     metavar='FILE',
     help="Location of a script that converts JPEG images to 1 bpp TIF files. Those TIF files will be post-processed and embedded into the final PDF. Note that this is done _after_ OCRing the original images.",
 )
+advanced.add_argument(
+    '--user-script-skip-pages',
+    type=int,
+    nargs='+',
+    help="Number of pages to not convert to tif",
+)
 
 debugging = parser.add_argument_group(
     "Debugging", "Arguments to help with troubleshooting and debugging"

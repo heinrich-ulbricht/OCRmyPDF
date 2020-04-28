@@ -222,6 +222,20 @@ def extract_images(pike, root, log, options, extract_fn):
                 _, ext = result
                 yield pageno_for_xref[xref], xref, ext
 
+def get_page_numbers_for_xrefs(pike):
+    pageno_for_xref = {}
+    for pageno, page in enumerate(pike.pages):
+        try:
+            xobjs = page.Resources.XObject
+        except AttributeError:
+            continue
+        for _imname, image in dict(xobjs).items():
+            if image.objgen[1] != 0:
+                continue  # Ignore images in an incremental PDF
+            xref = image.objgen[0]
+            if xref not in pageno_for_xref:
+                pageno_for_xref[xref] = pageno
+    return pageno_for_xref
 
 def extract_images_generic(pike, root, log, options):
     """Extract any >=2bpp image we think we can improve"""
@@ -368,11 +382,17 @@ def transcode_jpegs(pike, jpegs, root, log, options):
 def transcode_images_via_script_to_tif(pike, images, image_name_fn, root, log, options):
     modified = set()
     if options.user_script_jpg_to_1bpp_tif:
+
+        page_numbers = get_page_numbers_for_xrefs(pike)
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=options.jobs
         ) as executor:
             futures = []
             for xref in images:
+                if (options.user_script_skip_pages and page_numbers[xref] in options.user_script_skip_pages):
+                    log.debug("Skipping image " + str(xref) + " as it appears first on an ignored page (" + str(options.user_script_skip_pages) + ")")
+                    continue
+
                 log.debug(image_name_fn(root, xref))
                 futures.append(
                     executor.submit(
