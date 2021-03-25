@@ -5,13 +5,421 @@ Release notes
 OCRmyPDF uses `semantic versioning <http://semver.org/>`__ for its
 command line interface and its public API.
 
-The ``ocrmypdf`` package may now be imported. The public API may be
-useful in scripts that launch OCRmyPDF processes or that wish to use
-some of its features for working with PDFs.
+OCRmyPDF's output messages are not considered part of the stable interface -
+that is, output messages may be improved at any release level, so parsing them
+may be unreliable. Use the API to depend on precise behavior.
 
-Note that it is licensed under GPLv3, so scripts that
-``import ocrmypdf`` and are released publicly should probably also be
-licensed under GPLv3.
+The public API may be useful in scripts that launch OCRmyPDF processes or that
+wish to use some of its features for working with PDFs.
+
+v11.7.3
+=======
+
+-  Exclude CCITT Group 3 images from being optimized. Some libraries
+   OCRmyPDF uses do not seem to handle this obscure compression format properly.
+   You may get errors or possible corrupted output images without this fix.
+
+v11.7.2
+=======
+
+-  Updated pinned versions in main.txt, primarily to upgrade Pillow to 8.1.2, due
+   to recently disclosed security vulnerabilities in that software.
+-  The ``--sidecar`` parameter now causes an exception if set to the same file as
+   the input or output PDF.
+
+v11.7.1
+=======
+
+-  Some exceptions while attempting image optimization were only logged at the debug
+   level, causing them to be suppressed. These errors are now logged appropriately.
+-  Improved the error message related to ``--unpaper-args``.
+-  Updated documentation to mention the new conda distribution.
+
+v11.7.0
+=======
+
+-  We now support using ``--sidecar`` in conjunction with ``--pages``; these arguments
+   used to be mutually exclusive. (#735)
+-  Fixed a possible issue with PDF/A-1b generation. Acrobat complained that our PDFs use
+   object streams. More robust PDF/A validators like veraPDF don't consider this a
+   problem, but we'll honor Acrobat's objection from here on. This may increase file
+   size of PDF/A-1b files. PDF/A-2b files will not be affected.
+
+v11.6.2
+=======
+
+-  Fixed a regression where the wrong page orientation would be produced when using
+   arguments such as ``--deskew --rotate-pages`` (#730).
+
+v11.6.1
+=======
+
+-  Fixed an issue with attempting optimize unusually narrow-width images by excluding
+   these images from optimization (#732).
+-  Remove an obsolete compatibility shim for a version of pikepdf that is no longer
+   supported.
+
+v11.6.0
+=======
+
+-  OCRmyPDF will now automatically register plugins from the same virtual environment
+   with an appropriate setuptools entrypoint.
+-  Refactor the plugin manager to remove unnecessary complications and make plugin
+   registration more automatic.
+-  ``PageContext`` and ``PdfContext`` are now formally part of the API, as they
+   should have been, since they were part of ``ocrmypdf.pluginspec``.
+
+v11.5.0
+=======
+
+-  Fixed an issue where the output page size might differ by a fractional amount
+   due to rounding, when ``--force-ocr`` was used and the page contained objects
+   with multiple resolutions.
+-  When determining the resolution at which to rasterize a page, we now consider
+   printed text on the page as requiring a higher resolution. This fixes issues
+   with certain pages being rendered with unacceptably low resolution text, but
+   may increase output file sizes in some workflows where low resolution text
+   is acceptable.
+-  Added a workaround to fix an exception that occurs when trying to
+   ``import ocrmypdf.leptonica`` on Apple ARM silicon (or potentially, other
+   platforms that do not permit write+executable memory).
+
+v11.4.5
+=======
+
+-  Fixed an issue where files may not be closed when the API is used.
+-  Improved ``setup.cfg`` with better settings for test coverage.
+
+v11.4.4
+=======
+
+-  Fixed ``AttributeError: 'NoneType' object has no attribute 'userunit'``, issue #700,
+   related to OCRmyPDF not properly forwarded an error message from pdfminer.six.
+-  Adjusted typing of some arguments.
+-  ``ocrmypdf.ocr`` now takes a ``threading.Lock`` for reasons outlined in the
+   documentation.
+
+v11.4.3
+=======
+
+-  Removed a redundant debug message.
+-  Test suite now asserts that most patched functions are called when they should be.
+-  Test suite now skips a test that fails on two particular versions of piekpdf.
+
+v11.4.2
+=======
+
+-  Fixed support for Cygwin, hopefully.
+-  watcher.py: Fixed an issue with the OCR_LOGLEVEL not being interpreted.
+
+v11.4.1
+=======
+
+-  Fixed an issue where invalid pages ranges passed using the ``pages`` argument,
+   such as "1-0" would cause unhandled exceptions.
+-  Accepted a user-contributed to the Synology demo script in misc/synology.py.
+-  Clarified documentation about change of temporary file location ``ocrmypdf.io``.
+-  Fixed Python wheel tag which was incorrectly set to py35 even though we long
+   since dropped support for Python 3.5.
+
+v11.4.0
+=======
+
+-  When looking for Tesseract and Ghostscript, we now check the Windows Registry to
+   see if their installers registered the location of their executables. This should
+   help Windows users who have installed these programs to non-standard
+   locations.
+-  We now report on the progress of PDF/A conversion, since this operation is
+   sometimes slow.
+-  Improved command line completions.
+-  The prefix of the temporary folder OCRmyPDF creates has been changed from
+   ``com.github.ocrmypdf`` to ``ocrmypdf.io``. Scripts that chose to depend on this
+   prefix may need to be adjusted. (This has always been an implementation detail so is
+   not considered part of the semantic versioning "contract".)
+-  Fixed issue #692, where a particular file with malformed fonts would flood an
+   internal message cue by generating so many debug messages.
+-  Fixed an exception on processing hOCR files with no page record. Tesseract
+   is not known to generate such files.
+
+v11.3.4
+=======
+
+-  Fixed an error message 'called readLinearizationData for file that is not
+   linearized' that may occur when pikepdf 2.1.0 is used. (Upgrading to pikepdf
+   2.1.1 also fixes the issue.)
+-  File watcher now automatically includes ``.PDF`` in addition to ``.pdf`` to
+   better support case sensitive file systems.
+-  Some documentation and comment improvements.
+
+v11.3.3
+=======
+
+-  If unpaper outputs non-UTF-8 data, quietly fix this rather than choke on the
+   conversion. (Possibly addresses #671.)
+
+v11.3.2
+=======
+
+-  Explicitly require pikepdf 2.0.0 or newer when running on Python 3.9. (There are
+   concerns about the stability of pybind11 2.5.x with Python 3.9, which is used in
+   pikepdf 1.x.)
+-  Fixed another issue related to page rotation.
+-  Fixed an issue where image marked as image masks were not properly considered
+   as optimization candidates.
+-  On some systems, unpaper seems to be unable to process the PNGs we offer it
+   as input. We now convert the input to PNM format, which unpaper always accepts.
+   Fixes #665 and #667.
+-  DPI sent to unpaper is now rounded to a more reasonable number of decimal digits.
+-  Debug and error messages from unpaper were being suppressed.
+-  Some documentation tweaks.
+
+v11.3.1
+=======
+
+-  Declare support for new versions: pdfminer.six 20201018 and pikepdf 2.x
+-  Fix warning related to ``--pdfa-image-compression`` that appears at the wrong
+   time.
+
+v11.3.0
+=======
+
+-  The "OCR" step is describing as "Image processing" in the output messages when
+   OCR is disabled, to better explain the application's behavior.
+-  Debug logs are now only created when run as a command line, and not when OCR
+   is performed for an API call. It is the calling application's responsibility
+   to set up logging.
+-  For PDFs with a low number of pages, we gathered information about the input PDF
+   in a thread rather than process (when there are more pages). When run as a
+   thread, we did not close the file handle to the working PDF, leaking one file
+   handle per call of ``ocrmypdf.ocr``.
+-  Fixed an issue where debug messages send by child worker processes did not match
+   the log settings of parent process, causing messages to be dropped. This affected
+   macOS and Windows only where the parent process is not forked.
+-  Fixed the hookspec of rasterize_pdf_page to remove default parameters that
+   were not handled in an expected way by pluggy.
+-  Fixed another issue with automatic page rotation (#658) due to the issue above.
+
+v11.2.1
+=======
+
+-  Fixed an issue where optimization of a 1-bit image with a color palette or
+   associated ICC that was optimized to JBIG2 could have its colors inverted.
+
+v11.2.0
+=======
+
+-  Fixed an issue with optimizing PNG-type images that had soft masks or image masks.
+   This is a regression introduced in (or about) v11.1.0.
+-  Improved type checking of the ``plugins`` parameter for the ``ocrmypdf.ocr``
+   API call.
+
+v11.1.2
+=======
+
+-  Fixed hOCR renderer writing the text in roughly reverse order. This should not
+   affect reasonably smart PDF readers that properly locate the position of all
+   text, but may confuse those that rely on the order of objects in the content
+   stream. (#642)
+
+v11.1.1
+=======
+
+-  We now avoid using named temporary files when using pngquant allowing containerized
+   pngquant installs to be used.
+-  Clarified an error message.
+-  Highest number of 1's in a release ever!
+
+v11.1.0
+=======
+
+-  Fixed page rotation issues: #634, #589.
+-  Fixed some cases where optimization created an invalid image such as a
+   1-bit "RGB" image: #629, #620.
+-  Page numbers are now displayed in debug logs when pages are being grafted.
+-  ocrmypdf.optimize.rewrite_png and ocrmypdf.optimize.rewrite_png_as_g4 were
+   marked deprecated. Strictly speaking these should have been internal APIs,
+   but they were never hidden.
+-  As a precaution, pikepdf mmap-based file access has been disabled due to a
+   rare race condition that causes a crash when certain objects are deallocated.
+   The problem is likely in pikepdf's dependency pybind11.
+-  Extended the example plugin to demonstrate conversion to mono.
+
+v11.0.2
+=======
+
+-  Fixed issue #612, TypeError exception. Fixed by eliminating unnecessary repair of
+   input PDF metadata in memory.
+
+v11.0.1
+=======
+
+-  Blacklist pdfminer.six 20200720, which has a regression fixed in 20200726.
+-  Approve img2pdf 0.4 as it passes tests.
+-  Clarify that the GPL-3 portion of pdfa.py was removed with the changes in v11.0.0;
+   the debian/copyright file did not properly annotate this change.
+
+v11.0.0
+=======
+
+-  Project license changed to Mozilla Public License 2.0. Some miscellaneous
+   code is now under MIT license and non-code content/media remains under
+   CC-BY-SA 4.0. License changed with approval of all people who were found
+   to have contributed to GPLv3 licensed sections of the project. (#600)
+-  Because the license changed, this is being treated as a major version number
+   change; however, there are no known breaking changes in functional behavior
+   or API compared to v10.x.
+
+v10.3.3
+=======
+
+-  Fixed a "KeyError: 'dpi'" error message when using ``--threshold`` on an image.
+   (#607)
+
+v10.3.2
+=======
+
+-  Fixed a case where we reported "no reason" for a file size increase, when we
+   could determine the reason.
+-  Enabled support for pdfminer.six 20200726.
+
+v10.3.1
+=======
+
+-  Fixed a number of test suite failures with pdfminer.six older than veresion 20200402.
+-  Enabled support for pdfminer.six 20200720.
+
+v10.3.0
+=======
+
+-  Fixed an issue where we would consider images that were already JBIG2-encoded
+   for optimization, potentially producing a less optimized image than the original.
+   We do not believe this issue would ever cause an image to loss fidelity.
+-  Where available, pikepdf memory mapping is now used. This improves performance.
+-  When Leptonica 1.79+ is installed, use its new error handling API to avoid
+   a "messy" redirection of stderr which was necessary to capture its error
+   messages.
+-  For older versions of Leptonica, added a new thread level lock. This fixes a
+   possible race condition in handling error conditions in Leptonica (although
+   there is no evidence it ever caused issues in practice).
+-  Documentation improvements and more type hinting.
+
+v10.2.1
+=======
+
+-  Disabled calculation of text box order with pdfminer. We never needed this result
+   and it is expensive to calculate on files with complex pre-existing text.
+-  Fixed plugin manager to accept ``Path(plugin)`` as a path to a plugin.
+-  Fixed some typing errors.
+-  Documentation improvements.
+
+v10.2.0
+=======
+
+-  Update Docker image to use Ubuntu 20.04.
+-  Fixed issue PDF/A acquires title "Untitled" after conversion. (#582)
+-  Fixed a problem where, when using ``--pdf-renderer hocr``, some text would
+   be missing from the output when using a more recent version of Tesseract.
+   Tesseract began adding more detailed markup about the semantics of text
+   that our HOCR transform did not recognize, so it ignored them. This option is
+   not the default. If necessary ``--redo-ocr`` also redoing OCR to fix such issues.
+-  Fixed an error in Python 3.9 beta, due to removal of deprecated
+   ``Element.getchildren()``. (#584)
+-  Implemented support using the API with ``BytesIO`` and other file stream objects.
+   (#545)
+
+v10.1.1
+=======
+
+-  Fixed ``OMP_THREAD_LIMIT`` set to invalid value error messages on some input
+   files. (The error was harmless, apart from less than optimal performance in
+   some cases.)
+
+v10.1.0
+=======
+
+-  Previously, we ``--clean-final`` would cause an unpaper-cleaned page image to
+   be produced twice, which was necessary in some cases but not in general. We
+   now take this optimization opportunity and reuse the image if possible.
+-  We now provide PNG files as input to unpaper, since it accepts them, instead
+   of generating PPM files which can be very large. This can improve performance
+   and temporary disk usage.
+-  Documentation updated for plugins.
+
+v10.0.1
+=======
+
+-  Fixed regression when ``-l lang1+lang2`` is used from command line.
+
+v10.0.0
+=======
+
+**Breaking changes**
+
+-  Support for pdfminer.six version 20181108 has been dropped, along with a
+   monkeypatch that made this version work.
+-  Output messages are now displayed in color (when supported by the terminal)
+   and prefixes describing the severity of the message are removed. As such
+   programs that parse OCRmyPDF's log message will need to be revised. (Please
+   consider using OCRmyPDF as a library instead.)
+-  The minimum version for certain dependencies has increased.
+-  Many API changes; see developer changes.
+-  The Python libraries pluggy and coloredlogs are now required.
+
+**New features and improvements**
+
+-  PDF page scanning is now parallelized across CPUs, speeding up this phase
+   dramatically for files with a high page counts.
+-  PDF page scanning is optimized, addressing some performance regressions.
+-  PDF page scanning is no longer run on pages that are not selected when the
+   ``--pages`` argument is used.
+-  PDF page scanning is now independent of Ghostscript, ending our past reliance
+   on this occasionally unstable feature in Ghostscript.
+-  A plugin architecture has been added, currently allowing one to more easily
+   use a different OCR engine or PDF renderer from Tesseract and Ghostscript,
+   respectively. A plugin can also override some decisions, such changing
+   the OCR settings after initial scanning.
+-  Colored log messages.
+
+**Developer changes**
+
+-  The test spoofing mechanism, used to test correct handling of failures in
+   Tesseract and Ghostscript, has been removed in favor of using plugins for
+   testing. The spoofing mechanism was fairly complex and required many special
+   hacks for Windows.
+-  Code describing the resolution in DPI of images was refactored into a
+   ``ocrmypdf.helpers.Resolution`` class.
+-  The module ``ocrmypdf._exec`` is now private to OCRmyPDF.
+-  The ``ocrmypdf.hocrtransform`` module has been updated to follow PEP8 naming
+   conventions.
+-  Ghostscript is no longer used for finding the location of text in PDFs, and
+   APIs related to this feature have been removed.
+-  Lots of internal reorganization to support plugins.
+
+v9.8.2
+======
+
+-  Fixed an issue where OCRmyPDF would ignore text inside Form XObject when
+   making certain decisions about whether a document already had text.
+-  Fixed file size increase warning to take overhead of small files into account.
+-  Added instructions for installing on Cygwin.
+
+v9.8.1
+======
+
+-  Fixed an issue where unexpected files in the ``%PROGRAMFILES%\gs`` directory
+   (Windows) caused an exception.
+-  Mark pdfminer.six 20200517 as supported.
+-  If jbig2enc is missing and optimization is requested, a warning is issued
+   instead of an error, which was the intended behavior.
+-  Documentation updates.
+
+v9.8.0
+======
+
+-  Fixed issue where only the first PNG (FlateDecode) image in a file would be
+   considered for optimization. File sizes should be improved from here on.
+-  Fixed a startup crash when the chosen language was Japanese (#543).
+-  Added options to configure polling and log level to watcher.py.
 
 v9.7.2
 ======
@@ -220,7 +628,7 @@ v9.0.0
 
 -  Added a high level API for applications that want to integrate OCRmyPDF.
    Special thanks to Martin Wind (@mawi1988) whose made significant contributions
-   to this effort. OCRmyPDF is GPLv3-licensed.
+   to this effort.
 -  Added progress bars for long-running steps. ■■■■■■■□□
 -  We now create linearized ("fast web view") PDFs by default. The new parameter
    ``--fast-web-view`` provides control over when this feature is applied.
@@ -847,8 +1255,8 @@ v6.1.0
 v6.0.0
 ======
 
--  The software license has been changed to GPLv3. Test resource files
-   and some individual sources may have other licenses.
+-  The software license has been changed to GPLv3 [it has since changed again].
+   Test resource files and some individual sources may have other licenses.
 -  OCRmyPDF now depends on
    `PyMuPDF <https://pymupdf.readthedocs.io/en/latest/installation/>`__.
    Including PyMuPDF is the primary reason for the change to GPLv3.

@@ -1,28 +1,18 @@
 # © 2019 James R. Barlow: github.com/jbarlow83
 #
-# This file is part of OCRmyPDF.
-#
-# OCRmyPDF is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# OCRmyPDF is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with OCRmyPDF.  If not, see <http://www.gnu.org/licenses/>.
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
 
 import logging
 import multiprocessing
-from pathlib import Path
+import os
 from unittest.mock import MagicMock
 
 import pytest
 
-import ocrmypdf.helpers as helpers
+from ocrmypdf import helpers as helpers
 
 
 class TestSafeSymlink:
@@ -46,12 +36,17 @@ class TestSafeSymlink:
 
 
 def test_no_cpu_count(monkeypatch):
+    invoked = False
+
     def cpu_count_raises():
+        nonlocal invoked
+        invoked = True
         raise NotImplementedError()
 
     monkeypatch.setattr(multiprocessing, 'cpu_count', cpu_count_raises)
     with pytest.warns(expected_warning=UserWarning):
         assert helpers.available_cpu_count() == 1
+    assert invoked, "Patched function called during test"
 
 
 def test_deprecated():
@@ -61,6 +56,11 @@ def test_deprecated():
 
     with pytest.deprecated_call():
         assert old_function() == 42
+
+
+skipif_docker = pytest.mark.skipif(
+    pytest.helpers.running_in_docker(), reason="fails on Docker"
+)
 
 
 class TestFileIsWritable:
@@ -82,6 +82,7 @@ class TestFileIsWritable:
         loop.symlink_to(loop)
         assert not helpers.is_file_writable(loop)
 
+    @skipif_docker
     def test_chmod(self, basic_file):
         assert helpers.is_file_writable(basic_file)
         basic_file.chmod(0o400)
@@ -95,3 +96,23 @@ class TestFileIsWritable:
         pathmock.exists.return_value = True
         pathmock.is_file.side_effect = PermissionError
         assert not helpers.is_file_writable(pathmock)
+
+
+@pytest.mark.skipif(os.name != 'nt', reason="Windows test")
+def test_shim_paths(tmp_path):
+    from ocrmypdf.subprocess._windows import shim_env_path
+
+    progfiles = tmp_path / 'Program Files'
+    progfiles.mkdir()
+    (progfiles / 'tesseract-ocr').mkdir()
+    (progfiles / 'gs' / '9.51' / 'bin').mkdir(parents=True)
+    (progfiles / 'gs' / '9.52' / 'bin').mkdir(parents=True)
+    syspath = tmp_path / 'bin'
+    env = {'PROGRAMFILES': str(progfiles), 'PATH': str(syspath)}
+
+    result_str = shim_env_path(env=env)
+    results = result_str.split(os.pathsep)
+    assert results[0] == str(syspath), results
+    assert results[-3].endswith('tesseract-ocr'), results
+    assert results[-2].endswith(os.path.join('gs', '9.52', 'bin')), results
+    assert results[-1].endswith(os.path.join('gs', '9.51', 'bin')), results

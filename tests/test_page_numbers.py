@@ -1,19 +1,9 @@
 # © 2019 James R. Barlow: github.com/jbarlow83
 #
-# This file is part of OCRmyPDF.
-#
-# OCRmyPDF is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# OCRmyPDF is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with OCRmyPDF.  If not, see <http://www.gnu.org/licenses/>.
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
 
 import pytest
 
@@ -38,6 +28,12 @@ from ocrmypdf.pdfinfo import PdfInfo
         ['1,3,-11', BadArgsError],
         ['1-,', BadArgsError],
         ['start-end', BadArgsError],
+        ['1-0', BadArgsError],
+        ['99-98', BadArgsError],
+        ['0-0', BadArgsError],
+        ['1-0,3-4', BadArgsError],
+        [',', BadArgsError],
+        ['', BadArgsError],
     ],
 )
 def test_pages(pages, result):
@@ -58,7 +54,7 @@ def test_list_range():
     assert _pages_from_ranges([0, 1, 2]) == {0, 1, 2}
 
 
-def test_limited_pages(resources, outpdf, spoof_tesseract_cache):
+def test_limited_pages(resources, outpdf):
     multi = resources / 'multipage.pdf'
     ocrmypdf.ocr(
         multi,
@@ -66,7 +62,7 @@ def test_limited_pages(resources, outpdf, spoof_tesseract_cache):
         pages='5-6',
         optimize=0,
         output_type='pdf',
-        tesseract_env=spoof_tesseract_cache,
+        plugins=['tests/plugins/tesseract_cache.py'],
     )
     pi = PdfInfo(outpdf)
     assert not pi.pages[0].has_text

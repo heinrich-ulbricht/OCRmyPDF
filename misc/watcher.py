@@ -1,18 +1,23 @@
 # Copyright (C) 2019 Ian Alexander: https://github.com/ianalexander
 # Copyright (C) 2020 James R Barlow: https://github.com/jbarlow83
 #
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
 #
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
 #
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
 
 import json
 import logging
@@ -25,6 +30,7 @@ from pathlib import Path
 import pikepdf
 from watchdog.events import PatternMatchingEventHandler
 from watchdog.observers import Observer
+from watchdog.observers.polling import PollingObserver
 
 import ocrmypdf
 
@@ -32,13 +38,14 @@ import ocrmypdf
 
 INPUT_DIRECTORY = os.getenv('OCR_INPUT_DIRECTORY', '/input')
 OUTPUT_DIRECTORY = os.getenv('OCR_OUTPUT_DIRECTORY', '/output')
-OUTPUT_DIRECTORY_YEAR_MONTH = bool(os.getenv('OCR_OUTPUT_DIRECTORY_YEAR_MONTH', False))
-ON_SUCCESS_DELETE = bool(os.getenv('OCR_ON_SUCCESS_DELETE', False))
-DESKEW = bool(os.getenv('OCR_DESKEW', False))
+OUTPUT_DIRECTORY_YEAR_MONTH = bool(os.getenv('OCR_OUTPUT_DIRECTORY_YEAR_MONTH', ''))
+ON_SUCCESS_DELETE = bool(os.getenv('OCR_ON_SUCCESS_DELETE', ''))
+DESKEW = bool(os.getenv('OCR_DESKEW', ''))
 OCR_JSON_SETTINGS = json.loads(os.getenv('OCR_JSON_SETTINGS', '{}'))
-POLL_NEW_FILE_SECONDS = os.getenv('OCR_POLL_NEW_FILE_SECONDS', 1)
-LOGLEVEL = os.environ.get('OCR_LOGLEVEL', 'INFO').upper()
-PATTERNS = ['*.pdf']
+POLL_NEW_FILE_SECONDS = int(os.getenv('OCR_POLL_NEW_FILE_SECONDS', '1'))
+USE_POLLING = bool(os.getenv('OCR_USE_POLLING', ''))
+LOGLEVEL = os.getenv('OCR_LOGLEVEL', 'INFO')
+PATTERNS = ['*.pdf', '*.PDF']
 
 log = logging.getLogger('ocrmypdf-watcher')
 
@@ -110,8 +117,14 @@ class HandleObserverEvent(PatternMatchingEventHandler):
 
 def main():
     ocrmypdf.configure_logging(
-        verbosity=ocrmypdf.Verbosity.default, manage_root_logger=True
+        verbosity=(
+            ocrmypdf.Verbosity.default
+            if LOGLEVEL != 'DEBUG'
+            else ocrmypdf.Verbosity.debug
+        ),
+        manage_root_logger=True,
     )
+    log.setLevel(LOGLEVEL)
     log.info(
         f"Starting OCRmyPDF watcher with config:\n"
         f"Input Directory: {INPUT_DIRECTORY}\n"
@@ -126,7 +139,8 @@ def main():
         f"DESKEW: {DESKEW}\n"
         f"ARGS: {OCR_JSON_SETTINGS}\n"
         f"POLL_NEW_FILE_SECONDS: {POLL_NEW_FILE_SECONDS}\n"
-        f"LOGLEVEL: {LOGLEVEL}\n"
+        f"USE_POLLING: {USE_POLLING}\n"
+        f"LOGLEVEL: {LOGLEVEL}"
     )
 
     if 'input_file' in OCR_JSON_SETTINGS or 'output_file' in OCR_JSON_SETTINGS:
@@ -134,7 +148,10 @@ def main():
         sys.exit(1)
 
     handler = HandleObserverEvent(patterns=PATTERNS)
-    observer = Observer()
+    if USE_POLLING:
+        observer = PollingObserver()
+    else:
+        observer = Observer()
     observer.schedule(handler, INPUT_DIRECTORY, recursive=True)
     observer.start()
     try:

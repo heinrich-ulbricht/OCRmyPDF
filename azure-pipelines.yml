@@ -22,6 +22,8 @@ stages:
               python.version: "3.7"
             Python38:
               python.version: "3.8"
+            Python39:
+              python.version: "3.9"
         steps:
           - task: UsePythonVersion@0
             inputs:
@@ -59,6 +61,8 @@ stages:
               python.version: "3.7"
             Python38:
               python.version: "3.8"
+            Python39:
+              python.version: "3.9"
         steps:
           - task: UsePythonVersion@0
             inputs:
@@ -149,19 +153,17 @@ stages:
       - job: "macOS_Mojave"
         pool:
           vmImage: "macos-10.14"
-        strategy:
-          matrix:
-            Python37:
-              python.version: "3.7"
-            Python38:
-              python.version: "3.8"
         steps:
-          - task: UsePythonVersion@0
-            inputs:
-              versionSpec: "$(python.version)"
+          # https://github.com/actions/virtual-environments/issues/664
+          # - task: UsePythonVersion@0
+          #   inputs:
+          #     versionSpec: "$(python.version)"
           - bash: |
               brew update
-              brew unlink python@2
+              brew upgrade python
+              echo "Using `python3 --version`"
+            displayName: "Update brew and Python"
+          - bash: |
               brew install \
                 exempi \
                 ghostscript \
@@ -169,8 +171,7 @@ stages:
                 leptonica \
                 openjpeg \
                 pngquant \
-                tesseract \
-                unpaper
+                tesseract
             displayName: "Install system packages"
           - bash: |
               pip3 install --upgrade pip

@@ -125,8 +125,7 @@ include:
 .. envvar:: OMP_THREAD_LIMIT
 
    Controls the number of threads Tesseract will use. OCRmyPDF will
-   manage this environment if it is not already set. (Currently, it will
-   set it to 1 because this gives the best results in testing.)
+   manage this environment variable if it is not already set.
 
 For example, if you have a development build of Tesseract don't wish to
 use the system installation, you can launch OCRmyPDF as follows:
@@ -148,7 +147,8 @@ In addition to tesseract, OCRmyPDF uses the following external binaries:
 
 -  ``gs`` (Ghostscript)
 -  ``unpaper``
--  ``qpdf``
+-  ``pngquant``
+-  ``jbig2``
 
 In each case OCRmyPDF will search the ``PATH`` environment variable to
 locate the binaries.
@@ -314,7 +314,7 @@ message is:
 .. code-block:: none
 
     Temporary working files retained at:
-    /tmp/com.github.ocrmypdf.u20wpz07
+    /tmp/ocrmypdf.io.u20wpz07
 
 The organization of this folder is an implementation detail and subject
 to change between releases. However the general organization is that

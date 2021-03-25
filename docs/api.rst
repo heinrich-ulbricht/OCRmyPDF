@@ -20,7 +20,8 @@ and largely have the same functions.
 
     import ocrmypdf
 
-    ocrmypdf.ocr('input.pdf', 'output.pdf', deskew=True)
+    if __name__ == '__main__':  # To ensure correct behavior on Windows and macOS
+        ocrmypdf.ocr('input.pdf', 'output.pdf', deskew=True)
 
 With a few exceptions, all of the command line arguments are available
 and may be passed as equivalent keywords.
@@ -35,29 +36,37 @@ The :func:`ocrmypdf.ocr` function runs OCRmyPDF similar to command line
 execution. To do this, it will:
 
 - create a monitoring thread
-- create worker processes (forking itself)
-- manage the signal flags of worker processes
+- create worker processes (on Linux, forking itself; on Windows and macOS, by
+  spawning)
+- manage the signal flags of its worker processes
 - execute other subprocesses (forking and executing other programs)
 
 The Python process that calls ``ocrmypdf.ocr()`` must be sufficiently
-privileged to perform these actions. If it is not, ``ocrmypdf()`` will
-fail.
+privileged to perform these actions.
 
 There is no currently no option to manage how jobs are scheduled other
 than the argument ``jobs=`` which will limit the number of worker
 processes.
 
-Forking a child process to call ``ocrmypdf.ocr()`` is suggested. That
+Creating a child process to call ``ocrmypdf.ocr()`` is suggested. That
 way your application will survive and remain interactive even if
-OCRmyPDF does not.
+OCRmyPDF fails for any reason.
+
+Programs that call ``ocrmypdf.ocr()`` should also install a SIGBUS signal
+handler (except on Windows), to raise an exception if access to a memory
+mapped file fails. OCRmyPDF may use memory mapping.
+
+``ocrmypdf.ocr()`` will take a threading lock to prevent multiple runs of itself
+in the same Python interpreter process. This is not thread-safe, because of how
+OCRmyPDF's plugins and Python's library import system work. If you need to parallelize
+OCRmyPDF, use processes.
 
 .. warning::
 
-    On Windows, the script that calls ``ocrmypdf.ocr()`` must be protected
-    by an "ifmain" guard (``if __name__ == '__main__'``) or you must use
-    ``ocrmypdf.ocr(...use_threads=True)``. If you do not take at least one
-    of these steps, Windows fork semantics will prevent OCRmyPDF from working
-    correct.
+    On Windows and macOS, the script that calls ``ocrmypdf.ocr()`` must be
+    protected by an "ifmain" guard (``if __name__ == '__main__'``). If you do
+    not take at least one of these steps, process semantics will prevent
+    OCRmyPDF from working correctly.
 
 Logging
 -------
@@ -102,10 +111,6 @@ Reference
 .. autofunction:: ocrmypdf.ocr
 
 .. autoclass:: ocrmypdf.Verbosity
-    :members:
-    :undoc-members:
-
-.. autoclass:: ocrmypdf.ExitCode
     :members:
     :undoc-members:
 

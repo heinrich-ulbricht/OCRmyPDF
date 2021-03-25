@@ -3,20 +3,10 @@
 #
 # © 2013-16: jbarlow83 from Github (https://github.com/jbarlow83)
 #
-# This file is part of OCRmyPDF.
-#
-# OCRmyPDF is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# OCRmyPDF is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with OCRmyPDF.  If not, see <http://www.gnu.org/licenses/>.
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
 #
 # Python FFI wrapper for Leptonica library
 
@@ -24,26 +14,29 @@ import argparse
 import logging
 import os
 import sys
+import threading
 import warnings
+from collections import deque
 from collections.abc import Sequence
 from contextlib import suppress
 from ctypes.util import find_library
 from functools import lru_cache
-from io import BytesIO
+from io import BytesIO, UnsupportedOperation
 from os import fspath
 from tempfile import TemporaryFile
 
-from .exceptions import MissingDependencyError
-from .exec import shim_paths_with_program_files
-from .lib._leptonica import ffi
+from ocrmypdf.exceptions import MissingDependencyError
+from ocrmypdf.lib._leptonica import ffi
 
 # pylint: disable=protected-access
 
 logger = logging.getLogger(__name__)
 
 if os.name == 'nt':
+    from ocrmypdf.subprocess._windows import shim_env_path
+
     libname = 'liblept-5'
-    os.environ['PATH'] = shim_paths_with_program_files()
+    os.environ['PATH'] = shim_env_path()
 else:
     libname = 'lept'
 _libpath = find_library(libname)
@@ -66,6 +59,24 @@ if not _libpath:
         ---------------------------------------------------------------------
         """
     )
+if os.name == 'nt':
+    # On Windows, recent versions of libpng require zlib. We have to make sure
+    # the zlib version being loaded is the same one that libpng was built with.
+    # This tries to import zlib from Tesseract's installation folder, falling back
+    # to find_library() if liblept is being loaded from somewhere else.
+    # Loading zlib from other places could cause a version mismatch
+    _zlib_path = os.path.join(os.path.dirname(_libpath), 'zlib1.dll')
+    if not os.path.exists(_zlib_path):
+        _zlib_path = find_library('zlib')
+    try:
+        zlib = ffi.dlopen(_zlib_path)
+    except ffi.error as e:
+        raise MissingDependencyError(
+            """
+            Could not load the zlib library. It could be that Tesseract is not installed properly,
+            we can't find the installation on your system PATH environment variable.
+            """
+        ) from e
 try:
     lept = ffi.dlopen(_libpath)
     lept.setMsgSeverity(lept.L_SEVERITY_WARNING)
@@ -75,7 +86,7 @@ except ffi.error as e:
     ) from e
 
 
-class _LeptonicaErrorTrap:
+class _LeptonicaErrorTrap_Redirect:
     """
     Context manager to trap errors reported by Leptonica.
 
@@ -90,20 +101,21 @@ class _LeptonicaErrorTrap:
 
     """
 
+    leptonica_lock = threading.Lock()
+
     def __init__(self):
         self.tmpfile = None
         self.copy_of_stderr = -1
         self.no_stderr = False
 
     def __enter__(self):
-        from io import UnsupportedOperation
-
         self.tmpfile = TemporaryFile()
 
         # Save the old stderr, and redirect stderr to temporary file
-        with suppress(AttributeError):
-            sys.stderr.flush()
+        self.leptonica_lock.acquire()
         try:
+            with suppress(AttributeError):
+                sys.stderr.flush()
             self.copy_of_stderr = os.dup(sys.stderr.fileno())
             os.dup2(self.tmpfile.fileno(), sys.stderr.fileno(), inheritable=False)
         except AttributeError:
@@ -115,7 +127,10 @@ class _LeptonicaErrorTrap:
             os.dup2(self.tmpfile.fileno(), 2, inheritable=False)
         except UnsupportedOperation:
             self.copy_of_stderr = None
-        return
+        except Exception:
+            self.leptonica_lock.release()
+            raise
+        return self
 
     def __exit__(self, exc_type, exc_value, traceback):
         # Restore old stderr
@@ -132,6 +147,8 @@ class _LeptonicaErrorTrap:
         self.tmpfile.seek(0)  # Cursor will be at end, so move back to beginning
         leptonica_output = self.tmpfile.read().decode(errors='replace')
         self.tmpfile.close()
+        self.leptonica_lock.release()
+
         # If there are Python errors, record them
         if exc_type:
             logger.warning(leptonica_output)
@@ -147,6 +164,64 @@ class _LeptonicaErrorTrap:
             raise LeptonicaError(leptonica_output)
 
         return False
+
+
+tls = threading.local()
+tls.trap = None
+
+
+class _LeptonicaErrorTrap_Queue:
+    def __init__(self):
+        self.queue = deque()
+
+    def __enter__(self):
+        self.queue.clear()
+        tls.trap = self.queue
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        tls.trap = None
+        output = ''.join(self.queue)
+        self.queue.clear()
+
+        # If there are Python errors, record them
+        if exc_type:
+            logger.warning(output)
+
+        if 'Error' in output:
+            if 'image file not found' in output:
+                raise FileNotFoundError()
+            if 'pixWrite: stream not opened' in output:
+                raise LeptonicaIOError()
+            if 'index not valid' in output:
+                raise IndexError()
+            raise LeptonicaError(output)
+        return False
+
+
+try:
+
+    @ffi.callback("void(char *)")
+    def _stderr_handler(cstr):
+        msg = ffi.string(cstr).decode(errors='replace')
+        if msg.startswith("Error"):
+            logger.error(msg)
+        elif msg.startswith("Warning"):
+            logger.warning(msg)
+        else:
+            logger.debug(msg)
+        if tls.trap is not None:
+            tls.trap.append(msg)
+        return
+
+    lept.leptSetStderrHandler(_stderr_handler)
+except (ffi.error, MemoryError):
+    # Pre-1.79 Leptonica does not have leptSetStderrHandler
+    # And some platforms, notably Apple ARM 64, do not allow the write+execute
+    # memory needed to set up the callback function.
+    _LeptonicaErrorTrap = _LeptonicaErrorTrap_Redirect
+else:
+    # 1.79 have this new symbol
+    _LeptonicaErrorTrap = _LeptonicaErrorTrap_Queue
 
 
 class LeptonicaError(Exception):
@@ -351,7 +426,7 @@ class Pix(LeptonicaObject):
             py_file.write(buffer)
 
     @classmethod
-    def frompil(self, pillow_image):
+    def frompil(cls, pillow_image):
         """Create a copy of a PIL.Image from this Pix"""
         bio = BytesIO()
         pillow_image.save(bio, format='png', compress_level=1)
@@ -363,7 +438,7 @@ class Pix(LeptonicaObject):
 
     def topil(self):
         """Returns a PIL.Image version of this Pix"""
-        from PIL import Image
+        from PIL import Image  # pylint: disable=import-outside-toplevel
 
         # Leptonica manages data in words, so it implicitly does an endian
         # swap.  Tell Pillow about this when it reads the data.
@@ -534,16 +609,7 @@ class Pix(LeptonicaObject):
             )
             return Pix(thresh_pix)
 
-    def crop_to_foreground(
-        self,
-        threshold=128,
-        mindist=70,
-        erasedist=30,
-        pagenum=0,
-        showmorph=0,
-        display=0,
-        pdfdir=ffi.NULL,
-    ):
+    def crop_to_foreground(self, threshold=128, mindist=70, erasedist=30, showmorph=0):
         if get_leptonica_version() < 'leptonica-1.76':
             # Leptonica 1.76 changed the API for pixFindPageForeground; we don't
             # support the old version
@@ -866,6 +932,8 @@ def get_leptonica_version():
     Caveat: Leptonica expects the caller to free this memory.  We don't,
     since that would involve binding to libc to access libc.free(),
     a pointless effort to reclaim 100 bytes of memory.
+
+    Reminder that this returns "leptonica-1.xx" or "leptonica-1.yy.0".
     """
     return ffi.string(lept.getLeptonicaVersion()).decode()
 

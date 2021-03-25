@@ -1,7 +1,7 @@
 OCRmyPDF documentation
 ======================
 
-OCRmyPDF adds an optical charcter recognition (OCR) text layer to scanned PDF
+OCRmyPDF adds an optical character recognition (OCR) text layer to scanned PDF
 files, allowing them to be searched.
 
 PDF is the best format for storing and exchanging scanned documents.
@@ -26,7 +26,8 @@ image processing and OCR to existing PDFs.
    docker
    advanced
    batch
-   security
+   performance
+   pdfsecurity
    errors
 
 .. toctree::
@@ -34,6 +35,8 @@ image processing and OCR to existing PDFs.
    :maxdepth: 2
 
    api
+   plugins
+   apiref
    contributing
 
 Indices and tables

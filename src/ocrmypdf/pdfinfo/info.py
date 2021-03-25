@@ -1,38 +1,29 @@
 #!/usr/bin/env python3
 # © 2015 James R. Barlow: github.com/jbarlow83
 #
-# This file is part of OCRmyPDF.
-#
-# OCRmyPDF is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# OCRmyPDF is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with OCRmyPDF.  If not, see <http://www.gnu.org/licenses/>.
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
 
 import logging
 import re
 from collections import defaultdict, namedtuple
 from decimal import Decimal
 from enum import Enum
+from functools import partial
 from math import hypot, isclose
-from os import PathLike, fspath
+from os import PathLike
 from pathlib import Path
+from typing import Container, Iterator, Optional, Tuple, Union
 from warnings import warn
 
 import pikepdf
-from pikepdf import PdfMatrix
-from tqdm import tqdm
+from pikepdf import Object, Pdf, PdfMatrix
 
-from ocrmypdf.exceptions import EncryptedPdfError
-from ocrmypdf.exec import ghostscript
-from ocrmypdf.pdfinfo import ghosttext
+from ocrmypdf._concurrent import exec_progress_pool
+from ocrmypdf.exceptions import EncryptedPdfError, InputFileError
+from ocrmypdf.helpers import Resolution, available_cpu_count, pikepdf_enable_mmap
 from ocrmypdf.pdfinfo.layout import get_page_analysis, get_text_boxes
 
 logger = logging.getLogger()
@@ -90,7 +81,7 @@ UNIT_SQUARE = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
 def _is_unit_square(shorthand):
     values = map(float, shorthand)
     pairwise = zip(values, UNIT_SQUARE)
-    return all([isclose(a, b, rel_tol=1e-3) for a, b in pairwise])
+    return all(isclose(a, b, rel_tol=1e-3) for a, b in pairwise)
 
 
 XobjectSettings = namedtuple('XobjectSettings', ['name', 'shorthand', 'stack_depth'])
@@ -98,15 +89,19 @@ XobjectSettings = namedtuple('XobjectSettings', ['name', 'shorthand', 'stack_dep
 InlineSettings = namedtuple('InlineSettings', ['iimage', 'shorthand', 'stack_depth'])
 
 ContentsInfo = namedtuple(
-    'ContentsInfo', ['xobject_settings', 'inline_images', 'found_vector', 'name_index']
+    'ContentsInfo',
+    ['xobject_settings', 'inline_images', 'found_vector', 'found_text', 'name_index'],
 )
 
 TextboxInfo = namedtuple('TextboxInfo', ['bbox', 'is_visible', 'is_corrupt'])
 
 
-class VectorInfo:
-    def __init__(self):
-        pass
+class VectorMarker:
+    pass
+
+
+class TextMarker:
+    pass
 
 
 def _normalize_stack(graphobjs):
@@ -120,7 +115,7 @@ def _normalize_stack(graphobjs):
             yield (operands, operator)
 
 
-def _interpret_contents(contentstream, initial_shorthand=UNIT_SQUARE):
+def _interpret_contents(contentstream: Object, initial_shorthand=UNIT_SQUARE):
     """Interpret the PDF content stream.
 
     The stack represents the state of the PDF graphics stack.  We are only
@@ -153,9 +148,11 @@ def _interpret_contents(contentstream, initial_shorthand=UNIT_SQUARE):
     inline_images = []
     name_index = defaultdict(lambda: [])
     found_vector = False
+    found_text = False
     vector_ops = set('S s f F f* B B* b b*'.split())
+    text_showing_ops = set("""TJ Tj " '""".split())
     image_ops = set('BI ID EI q Q Do cm'.split())
-    operator_whitelist = ' '.join(vector_ops | image_ops)
+    operator_whitelist = ' '.join(vector_ops | text_showing_ops | image_ops)
 
     for n, graphobj in enumerate(
         _normalize_stack(
@@ -195,16 +192,19 @@ def _interpret_contents(contentstream, initial_shorthand=UNIT_SQUARE):
             inline_images.append(inline)
         elif operator in vector_ops:
             found_vector = True
+        elif operator in text_showing_ops:
+            found_text = True
 
     return ContentsInfo(
         xobject_settings=xobject_settings,
         inline_images=inline_images,
         found_vector=found_vector,
+        found_text=found_text,
         name_index=name_index,
     )
 
 
-def _get_dpi(ctm_shorthand, image_size):
+def _get_dpi(ctm_shorthand, image_size) -> Resolution:
     """Given the transformation matrix and image size, find the image DPI.
 
     PDFs do not include image resolution information within image data.
@@ -227,7 +227,7 @@ def _get_dpi(ctm_shorthand, image_size):
     width-axis vector v0 (1, 0), height-axis vector vh (0, 1) with the matrix,
     which gives the dimensions of the image in PDF units. From there we can
     compare to actual image dimensions. PDF uses
-    row vector * matrix_tranposed unlike the traditional
+    row vector * matrix_transposed unlike the traditional
     matrix * column vector.
 
     The offset, width and height vectors can be combined in a matrix and
@@ -265,14 +265,20 @@ def _get_dpi(ctm_shorthand, image_size):
     dpi_w = scale_w * 72.0
     dpi_h = scale_h * 72.0
 
-    return dpi_w, dpi_h
+    return Resolution(dpi_w, dpi_h)
 
 
 class ImageInfo:
     DPI_PREC = Decimal('1.000')
 
-    def __init__(self, *, name='', pdfimage=None, inline=None, shorthand=None):
-
+    def __init__(
+        self,
+        *,
+        name='',
+        pdfimage: Optional[Object] = None,
+        inline: Optional[Object] = None,
+        shorthand=None,
+    ):
         self._name = str(name)
         self._shorthand = shorthand
 
@@ -282,6 +288,8 @@ class ImageInfo:
         elif pdfimage is not None:
             self._origin = 'xobject'
             pim = pikepdf.PdfImage(pdfimage)
+        else:
+            raise ValueError("Either pdfimage or inline must be set")
         self._width = pim.width
         self._height = pim.height
 
@@ -356,12 +364,8 @@ class ImageInfo:
         return self._enc
 
     @property
-    def xres(self):
-        return _get_dpi(self._shorthand, (self._width, self._height))[0]
-
-    @property
-    def yres(self):
-        return _get_dpi(self._shorthand, (self._width, self._height))[1]
+    def dpi(self):
+        return _get_dpi(self._shorthand, (self._width, self._height))
 
     def __repr__(self):
         class_locals = {
@@ -371,11 +375,11 @@ class ImageInfo:
         }
         return (
             "<ImageInfo '{name}' {type_} {width}x{height} {color} "
-            "{comp} {bpc} {enc} {xres}x{yres}>"
+            "{comp} {bpc} {enc} {dpi}>"
         ).format(**class_locals)
 
 
-def _find_inline_images(contentsinfo):
+def _find_inline_images(contentsinfo: ContentsInfo) -> Iterator[ImageInfo]:
     "Find inline images in the contentstream"
 
     for n, inline in enumerate(contentsinfo.inline_images):
@@ -384,7 +388,7 @@ def _find_inline_images(contentsinfo):
         )
 
 
-def _image_xobjects(container):
+def _image_xobjects(container) -> Iterator[Tuple[Object, str]]:
     """Search for all XObject-based images in the container
 
     Usually the container is a page, but it could also be a Form XObject
@@ -404,7 +408,7 @@ def _image_xobjects(container):
         return
     xobjs = resources['/XObject'].as_dict()
     for xobj in xobjs:
-        candidate = xobjs[xobj]
+        candidate: Object = xobjs[xobj]
         if not '/Subtype' in candidate:
             continue
         if candidate['/Subtype'] == '/Image':
@@ -412,7 +416,9 @@ def _image_xobjects(container):
             yield (pdfimage, xobj)
 
 
-def _find_regular_images(container, contentsinfo):
+def _find_regular_images(
+    container: Object, contentsinfo: ContentsInfo
+) -> Iterator[ImageInfo]:
     """Find images stored in the container's /Resources /XObject
 
     Usually the container is a page, but it could also be a Form XObject
@@ -436,7 +442,7 @@ def _find_regular_images(container, contentsinfo):
             yield ImageInfo(name=draw.name, pdfimage=pdfimage, shorthand=draw.shorthand)
 
 
-def _find_form_xobject_images(pdf, container, contentsinfo):
+def _find_form_xobject_images(pdf: Pdf, container: Object, contentsinfo: ContentsInfo):
     """Find any images that are in Form XObjects in the container
 
     The container may be a page, or a parent Form XObject.
@@ -468,7 +474,9 @@ def _find_form_xobject_images(pdf, container, contentsinfo):
             )
 
 
-def _process_content_streams(*, pdf, container, shorthand=None):
+def _process_content_streams(
+    *, pdf: Pdf, container: Object, shorthand=None
+) -> Iterator[Union[VectorMarker, TextMarker, ImageInfo]]:
     """Find all individual instances of images drawn in the container
 
     Usually the container is a page, but it may also be a Form XObject.
@@ -509,13 +517,15 @@ def _process_content_streams(*, pdf, container, shorthand=None):
     contentsinfo = _interpret_contents(container, initial_shorthand)
 
     if contentsinfo.found_vector:
-        yield VectorInfo()
+        yield VectorMarker()
+    if contentsinfo.found_text:
+        yield TextMarker()
     yield from _find_inline_images(contentsinfo)
     yield from _find_regular_images(container, contentsinfo)
     yield from _find_form_xobject_images(pdf, container, contentsinfo)
 
 
-def _page_has_text(text_blocks, page_width, page_height):
+def _page_has_text(text_blocks, page_width, page_height) -> bool:
     """Smarter text detection that ignores text in margins"""
 
     pw, ph = float(page_width), float(page_height)
@@ -528,7 +538,7 @@ def _page_has_text(text_blocks, page_width, page_height):
         margin_ratio * ph,  # bottom  (first quadrant: bottom < top)
     )
 
-    def rects_intersect(a, b):
+    def rects_intersect(a, b) -> bool:
         """
         Where (a,b) are 4-tuple rects (left-0, top-1, right-2, bottom-3)
         https://stackoverflow.com/questions/306316/determine-if-two-rectangles-overlap-each-other
@@ -544,7 +554,7 @@ def _page_has_text(text_blocks, page_width, page_height):
     return has_text
 
 
-def simplify_textboxes(miner, textbox_getter):
+def simplify_textboxes(miner, textbox_getter) -> Iterator[TextboxInfo]:
     """Extract only limited content from text boxes
 
     We do this to save memory and ensure that our objects are pickleable.
@@ -558,149 +568,209 @@ def simplify_textboxes(miner, textbox_getter):
         yield TextboxInfo(box.bbox, visible, corrupt)
 
 
-def _pdf_get_pageinfo(pdf, pageno: int, infile: PathLike, xmltext: str):
-    pageinfo = {}
-    pageinfo['pageno'] = pageno
-    pageinfo['images'] = []
+worker_pdf = None
 
-    page = pdf.pages[pageno]
-    mediabox = [Decimal(d) for d in page.MediaBox.as_list()]
-    width_pt = mediabox[2] - mediabox[0]
-    height_pt = mediabox[3] - mediabox[1]
 
-    if xmltext is not None:
-        bboxes = ghosttext.page_get_textblocks(
-            fspath(infile), pageno, xmltext=xmltext, height=height_pt
-        )
-        pageinfo['bboxes'] = bboxes
-    else:
-        pscript5_mode = str(pdf.docinfo.get('/Creator')).startswith('PScript5')
-        miner = get_page_analysis(infile, pageno, pscript5_mode)
-        pageinfo['textboxes'] = list(simplify_textboxes(miner, get_text_boxes))
-        bboxes = (box.bbox for box in pageinfo['textboxes'])
+def _pdf_pageinfo_sync_init(infile: Path, pdfminer_loglevel):
+    global worker_pdf  # pylint: disable=global-statement
+    pikepdf_enable_mmap()
 
-    pageinfo['has_text'] = _page_has_text(bboxes, width_pt, height_pt)
+    logging.getLogger('pdfminer').setLevel(pdfminer_loglevel)
 
-    userunit = page.get('/UserUnit', Decimal(1.0))
-    if not isinstance(userunit, Decimal):
-        userunit = Decimal(userunit)
-    pageinfo['userunit'] = userunit
-    pageinfo['width_inches'] = width_pt * userunit / Decimal(72.0)
-    pageinfo['height_inches'] = height_pt * userunit / Decimal(72.0)
+    # If this function is called as a thread initializer, we need a messy hack
+    # to close worker_pdf. If called as a process, it will be released when the
+    # process is terminated.
+    worker_pdf = pikepdf.open(infile)
+
+
+def _pdf_pageinfo_sync(args):
+    global worker_pdf  # pylint: disable=global-statement
+    pageno, infile, check_pages, detailed_analysis = args
+    page = PageInfo(worker_pdf, pageno, infile, check_pages, detailed_analysis)
+    return page
+
+
+def _pdf_pageinfo_concurrent(
+    pdf, infile, progbar, max_workers, check_pages, detailed_analysis=False
+):
+    global worker_pdf  # pylint: disable=global-statement
+    pages = [None] * len(pdf.pages)
+
+    def update_pageinfo(result, pbar):
+        page = result
+        if not page:
+            raise InputFileError("Could read a page in the PDF")
+        pages[page.pageno] = page
+        pbar.update()
+
+    if max_workers is None:
+        max_workers = available_cpu_count()
+
+    total = len(pdf.pages)
+    contexts = ((n, infile, check_pages, detailed_analysis) for n in range(total))
+
+    use_threads = False  # No performance gain if threaded due to GIL
+    n_workers = min(1 + len(pages) // 4, max_workers)
+    if n_workers == 1:
+        # But if we decided on only one worker, there is no point in using
+        # a separate process.
+        use_threads = True
 
     try:
-        pageinfo['rotate'] = int(page['/Rotate'])
-    except KeyError:
-        pageinfo['rotate'] = 0
-
-    userunit_shorthand = (userunit, 0, 0, userunit, 0, 0)
-    contentsinfo = [
-        ci
-        for ci in _process_content_streams(
-            pdf=pdf, container=page, shorthand=userunit_shorthand
+        exec_progress_pool(
+            use_threads=use_threads,
+            max_workers=n_workers,
+            tqdm_kwargs=dict(
+                total=total, desc="Scanning contents", unit='page', disable=not progbar
+            ),
+            task_initializer=partial(
+                _pdf_pageinfo_sync_init, infile, logging.getLogger('pdfminer').level
+            ),
+            task=_pdf_pageinfo_sync,
+            task_arguments=contexts,
+            task_finished=update_pageinfo,
         )
-    ]
-
-    pageinfo['has_vector'] = False
-    if any(isinstance(ci, VectorInfo) for ci in contentsinfo):
-        pageinfo['has_vector'] = True
-
-    pageinfo['images'] = [im for im in contentsinfo if isinstance(im, ImageInfo)]
-    if pageinfo['images']:
-        xres = Decimal(max(image.xres for image in pageinfo['images']))
-        yres = Decimal(max(image.yres for image in pageinfo['images']))
-        pageinfo['xres'], pageinfo['yres'] = xres, yres
-        pageinfo['width_pixels'] = int(round(xres * pageinfo['width_inches']))
-        pageinfo['height_pixels'] = int(round(yres * pageinfo['height_inches']))
-
-    return pageinfo
-
-
-def _pdf_get_all_pageinfo(infile, detailed_analysis=False, log=None, progbar=False):
-    pdf = pikepdf.open(infile)  # Do not close in this function
-    try:
-        if pdf.is_encrypted:
-            raise EncryptedPdfError()  # Triggered by encryption with empty passwd
-        if detailed_analysis:
-            pages_xml = None
-        else:
-            pages_xml = ghosttext.extract_text_xml(infile, pdf, pageno=None, log=log)
-
-        pages = []
-        for n, _ in tqdm(
-            enumerate(pdf.pages),
-            total=len(pdf.pages),
-            desc="Scan",
-            unit='page',
-            disable=not progbar,
-        ):
-            page_xml = pages_xml[n] if pages_xml else None
-            page = PageInfo(pdf, n, infile, page_xml, detailed_analysis)
-            pages.append(page)
-    except Exception:
-        pdf.close()
-        raise
-
-    return pages, pdf
+    finally:
+        if worker_pdf and use_threads:
+            assert n_workers == 1, "Should have only one worker when threaded"
+            # This is messy, but if we ran in thread, close worker_pdf
+            worker_pdf.close()
+    return pages
 
 
 class PageInfo:
-    def __init__(self, pdf, pageno, infile, xmltext, detailed_analysis=False):
+    def __init__(
+        self,
+        pdf: Pdf,
+        pageno: int,
+        infile: PathLike,
+        check_pages: Container[int],
+        detailed_analysis: bool = False,
+    ):
         self._pageno = pageno
         self._infile = infile
-        self._pageinfo = _pdf_get_pageinfo(pdf, pageno, infile, xmltext)
         self._detailed_analysis = detailed_analysis
+        self._gather_pageinfo(pdf, pageno, infile, check_pages, detailed_analysis)
+
+    def _gather_pageinfo(
+        self,
+        pdf: Pdf,
+        pageno: int,
+        infile: PathLike,
+        check_pages: Container[int],
+        detailed_analysis: bool,
+    ):
+        page = pdf.pages[pageno]
+        mediabox = [Decimal(d) for d in page.MediaBox.as_list()]
+        width_pt = mediabox[2] - mediabox[0]
+        height_pt = mediabox[3] - mediabox[1]
+
+        check_this_page = pageno in check_pages
+
+        if check_this_page and detailed_analysis:
+            pscript5_mode = str(pdf.docinfo.get('/Creator')).startswith('PScript5')
+            miner = get_page_analysis(infile, pageno, pscript5_mode)
+            self._textboxes = list(simplify_textboxes(miner, get_text_boxes))
+            bboxes = (box.bbox for box in self._textboxes)
+
+            self._has_text = _page_has_text(bboxes, width_pt, height_pt)
+        else:
+            self._textboxes = []
+            self._has_text = None  # i.e. "no information"
+
+        userunit = page.get('/UserUnit', Decimal(1.0))
+        if not isinstance(userunit, Decimal):
+            userunit = Decimal(userunit)
+        self._userunit = userunit
+        self._width_inches = width_pt * userunit / Decimal(72.0)
+        self._height_inches = height_pt * userunit / Decimal(72.0)
+
+        try:
+            self._rotate = int(page['/Rotate'])
+        except KeyError:
+            self._rotate = 0
+
+        userunit_shorthand = (userunit, 0, 0, userunit, 0, 0)
+
+        if check_this_page:
+            self._has_vector = False
+            self._has_text = False
+            self._images = []
+            for ci in _process_content_streams(
+                pdf=pdf, container=page, shorthand=userunit_shorthand
+            ):
+                if isinstance(ci, VectorMarker):
+                    self._has_vector = True
+                elif isinstance(ci, TextMarker):
+                    self._has_text = True
+                elif isinstance(ci, ImageInfo):
+                    self._images.append(ci)
+                else:
+                    raise NotImplementedError()
+        else:
+            self._has_vector = None  # i.e. "no information"
+            self._has_text = None
+            self._images = None
+
+        self._dpi = None
+        if self._images:
+            dpi = Resolution(0.0, 0.0).take_max(image.dpi for image in self._images)
+            self._dpi = dpi
+            self._width_pixels = int(round(dpi.x * float(self._width_inches)))
+            self._height_pixels = int(round(dpi.y * float(self._height_inches)))
 
     @property
-    def pageno(self):
+    def pageno(self) -> int:
         return self._pageno
 
     @property
-    def has_text(self):
-        return self._pageinfo['has_text']
+    def has_text(self) -> bool:
+        return self._has_text
 
     @property
-    def has_corrupt_text(self):
+    def has_corrupt_text(self) -> bool:
         if not self._detailed_analysis:
             raise NotImplementedError('Did not do detailed analysis')
-        return any(tbox.is_corrupt for tbox in self._pageinfo['textboxes'])
+        return any(tbox.is_corrupt for tbox in self._textboxes)
 
     @property
-    def has_vector(self):
-        return self._pageinfo['has_vector']
+    def has_vector(self) -> bool:
+        return self._has_vector
 
     @property
-    def width_inches(self):
-        return self._pageinfo['width_inches']
+    def width_inches(self) -> Decimal:
+        return self._width_inches
 
     @property
-    def height_inches(self):
-        return self._pageinfo['height_inches']
+    def height_inches(self) -> Decimal:
+        return self._height_inches
 
     @property
-    def width_pixels(self):
-        return int(round(self.width_inches * self.xres))
+    def width_pixels(self) -> int:
+        return int(round(float(self.width_inches) * self.dpi.x))
 
     @property
-    def height_pixels(self):
-        return int(round(self.height_inches * self.yres))
+    def height_pixels(self) -> int:
+        return int(round(float(self.height_inches) * self.dpi.y))
 
     @property
-    def rotation(self):
-        return self._pageinfo.get('rotate', None)
+    def rotation(self) -> int:
+        return self._rotate
 
     @rotation.setter
     def rotation(self, value):
         if value in (0, 90, 180, 270, 360, -90, -180, -270):
-            self._pageinfo['rotate'] = value
+            self._rotate = value
         else:
             raise ValueError("rotation must be a cardinal angle")
 
     @property
     def images(self):
-        return self._pageinfo['images']
+        return self._images
 
-    def get_textareas(self, visible=None, corrupt=None):
+    def get_textareas(
+        self, visible: Optional[bool] = None, corrupt: Optional[bool] = None
+    ):
         def predicate(obj, want_visible, want_corrupt):
             result = True
             if want_visible is not None:
@@ -711,31 +781,25 @@ class PageInfo:
                     result = False
             return result
 
-        if 'textboxes' not in self._pageinfo:
+        if not self._textboxes:
             if visible is not None and corrupt is not None:
-                raise NotImplementedError('Ghostscript textboxes cannot be classified')
-            return self._pageinfo['bboxes']
+                raise NotImplementedError('Incomplete information on textboxes')
+            return self._textboxes
 
-        return (
-            obj.bbox
-            for obj in self._pageinfo['textboxes']
-            if predicate(obj, visible, corrupt)
-        )
+        return (obj.bbox for obj in self._textboxes if predicate(obj, visible, corrupt))
 
     @property
-    def xres(self):
-        return self._pageinfo.get('xres', None)
+    def dpi(self) -> Resolution:
+        if self._dpi is None:
+            return Resolution(0.0, 0.0)
+        return self._dpi
 
     @property
-    def yres(self):
-        return self._pageinfo.get('yres', None)
+    def userunit(self) -> Decimal:
+        return self._userunit
 
     @property
-    def userunit(self):
-        return self._pageinfo.get('userunit', None)
-
-    @property
-    def min_version(self):
+    def min_version(self) -> str:
         if self.userunit is not None:
             return '1.6'
         else:
@@ -743,65 +807,74 @@ class PageInfo:
 
     def __repr__(self):
         return (
-            '<PageInfo ' 'pageno={} {}"x{}" rotation={} res={}x{} has_text={}>'
-        ).format(
-            self.pageno,
-            self.width_inches,
-            self.height_inches,
-            self.rotation,
-            self.xres,
-            self.yres,
-            self.has_text,
+            f'<PageInfo '
+            f'pageno={self.pageno} {self.width_inches}"x{self.height_inches}" '
+            f'rotation={self.rotation} dpi={self.dpi} has_text={self.has_text}>'
         )
 
 
 class PdfInfo:
     """Get summary information about a PDF"""
 
-    def __init__(self, infile, detailed_page_analysis=False, log=logger, progbar=False):
+    def __init__(
+        self,
+        infile,
+        detailed_analysis: bool = False,
+        progbar: bool = False,
+        max_workers: int = None,
+        check_pages=None,
+    ):
         self._infile = infile
-        if ghostscript.version() in ('9.52',):
-            detailed_page_analysis = True  # txtwrite doesn't work in these versions
-        self._pages, pdf = _pdf_get_all_pageinfo(
-            infile, detailed_page_analysis, log=log, progbar=progbar
-        )
-        self._needs_rendering = pdf.root.get('/NeedsRendering', False)
-        self._has_acroform = False
-        if '/AcroForm' in pdf.root:
-            if len(pdf.root.AcroForm.get('/Fields', [])) > 0:
-                self._has_acroform = True
-            elif '/XFA' in pdf.root.AcroForm:
-                self._has_acroform = True
-        pdf.close()
+        if check_pages is None:
+            check_pages = range(0, 1_000_000_000)
+
+        with pikepdf.open(infile) as pdf:
+            if pdf.is_encrypted:
+                raise EncryptedPdfError()  # Triggered by encryption with empty passwd
+            self._pages = _pdf_pageinfo_concurrent(
+                pdf,
+                infile,
+                progbar,
+                max_workers,
+                check_pages=check_pages,
+                detailed_analysis=detailed_analysis,
+            )
+            self._needs_rendering = pdf.Root.get('/NeedsRendering', False)
+            self._has_acroform = False
+            if '/AcroForm' in pdf.Root:
+                if len(pdf.Root.AcroForm.get('/Fields', [])) > 0:
+                    self._has_acroform = True
+                elif '/XFA' in pdf.Root.AcroForm:
+                    self._has_acroform = True
 
     @property
     def pages(self):
         return self._pages
 
     @property
-    def min_version(self):
+    def min_version(self) -> str:
         # The minimum PDF is the maximum version that any particular page needs
         return max(page.min_version for page in self.pages)
 
     @property
-    def has_userunit(self):
+    def has_userunit(self) -> bool:
         return any(page.userunit != 1.0 for page in self.pages)
 
     @property
-    def has_acroform(self):
+    def has_acroform(self) -> bool:
         return self._has_acroform
 
     @property
-    def filename(self):
+    def filename(self) -> Union[str, Path]:
         if not isinstance(self._infile, (str, Path)):
             raise NotImplementedError("can't get filename from stream")
         return self._infile
 
     @property
-    def needs_rendering(self):
+    def needs_rendering(self) -> bool:
         return self._needs_rendering
 
-    def __getitem__(self, item):
+    def __getitem__(self, item) -> PageInfo:
         return self._pages[item]
 
     def __len__(self):
@@ -812,16 +885,16 @@ class PdfInfo:
 
 
 def main():
-    import argparse
+    import argparse  # pylint: disable=import-outside-toplevel
+    from pprint import pprint  # pylint: disable=import-outside-toplevel
 
     parser = argparse.ArgumentParser()
     parser.add_argument('infile')
     args = parser.parse_args()
-    pagesinfo, pdfinfo = _pdf_get_all_pageinfo(args.infile)
-    from pprint import pprint
+    pdfinfo = PdfInfo(args.infile)
 
     pprint(pdfinfo)
-    for page in pagesinfo:
+    for page in pdfinfo.pages:
         pprint(page)
         for im in page.images:
             pprint(im)

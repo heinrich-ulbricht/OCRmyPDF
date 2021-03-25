@@ -1,48 +1,38 @@
 #!/usr/bin/env python3
 # © 2015-17 James R. Barlow: github.com/jbarlow83
 #
-# This file is part of OCRmyPDF.
-#
-# OCRmyPDF is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# OCRmyPDF is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with OCRmyPDF.  If not, see <http://www.gnu.org/licenses/>.
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 
 import locale
 import logging
 import os
 import sys
+import unicodedata
 from pathlib import Path
 from shutil import copyfileobj
+from typing import List, Set, Tuple, Union
 
+import pikepdf
 import PIL
 
-from ._unicodefun import verify_python3_env
-from .exceptions import (
+from ocrmypdf._exec import jbig2enc, pngquant, unpaper
+from ocrmypdf._unicodefun import verify_python3_env
+from ocrmypdf.exceptions import (
     BadArgsError,
     InputFileError,
     MissingDependencyError,
     OutputFileAccessError,
 )
-from .exec import (
-    check_external_program,
-    ghostscript,
-    jbig2enc,
-    pngquant,
-    qpdf,
-    tesseract,
-    unpaper,
+from ocrmypdf.helpers import (
+    is_file_writable,
+    is_iterable_notstr,
+    monotonic,
+    safe_symlink,
 )
-from .helpers import is_file_writable, is_iterable_notstr, monotonic, safe_symlink
+from ocrmypdf.subprocess import check_external_program
 
 # -------------
 # External dependencies
@@ -67,74 +57,34 @@ def check_platform():
         )
 
 
-def check_options_languages(options):
-    if not options.language:
-        options.language = [DEFAULT_LANGUAGE]
+def check_options_languages(options, ocr_engine_languages):
+    if not options.languages:
+        options.languages = {DEFAULT_LANGUAGE}
         system_lang = locale.getlocale()[0]
         if system_lang and not system_lang.startswith('en'):
             log.debug("No language specified; assuming --language %s", DEFAULT_LANGUAGE)
-
-    # Support v2.x "eng+deu" language syntax
-    if '+' in options.language[0]:
-        options.language = options.language[0].split('+')
-
-    languages = set(options.language)
-    if not languages.issubset(tesseract.languages()):
+    if not ocr_engine_languages:
+        return
+    if not options.languages.issubset(ocr_engine_languages):
         msg = (
-            "The installed version of tesseract does not have language "
-            "data for the following requested languages: \n"
+            f"OCR engine does not have language data for the following "
+            "requested languages: \n"
         )
-        for lang in languages - tesseract.languages():
+        for lang in options.languages - ocr_engine_languages:
             msg += lang + '\n'
         raise MissingDependencyError(msg)
 
 
 def check_options_output(options):
-    # We have these constraints to check for.
-    # 1. Ghostscript < 9.20 mangles multibyte Unicode
-    # 2. hocr doesn't work on non-Latin languages (so don't select it)
+    is_latin = options.languages.issubset(HOCR_OK_LANGS)
 
-    languages = set(options.language)
-    is_latin = languages.issubset(HOCR_OK_LANGS)
-
-    if options.pdf_renderer == 'hocr' and not is_latin:
+    if options.pdf_renderer.startswith('hocr') and not is_latin:
         msg = (
             "The 'hocr' PDF renderer is known to cause problems with one "
             "or more of the languages in your document.  Use "
             "--pdf-renderer auto (the default) to avoid this issue."
         )
         log.warning(msg)
-
-    if ghostscript.version() < '9.20' and options.output_type != 'pdf' and not is_latin:
-        # https://bugs.ghostscript.com/show_bug.cgi?id=696874
-        # Ghostscript < 9.20 fails to encode multibyte characters properly
-        msg = (
-            "The installed version of Ghostscript does not work correctly "
-            "with the OCR languages you specified. Use --output-type pdf or "
-            "upgrade to Ghostscript 9.20 or later to avoid this issue."
-        )
-        msg += f"Found Ghostscript {ghostscript.version()}"
-        log.warning(msg)
-
-    # Decide on what renderer to use
-    if options.pdf_renderer == 'auto':
-        options.pdf_renderer = 'sandwich'
-
-    if options.pdf_renderer == 'sandwich' and not tesseract.has_textonly_pdf(
-        options.tesseract_env, languages
-    ):
-        raise MissingDependencyError(
-            "You are using an alpha version of Tesseract 4.0 that does not support "
-            "the textonly_pdf parameter. We don't support versions this old."
-        )
-
-    if options.output_type == 'pdfa':
-        options.output_type = 'pdfa-2'
-
-    if options.output_type == 'pdfa-3' and ghostscript.version() < '9.19':
-        raise MissingDependencyError(
-            "--output-type pdfa-3 requires Ghostscript 9.19 or later"
-        )
 
     lossless_reconstruction = False
     if not any(
@@ -162,6 +112,10 @@ def check_options_sidecar(options):
                 "--sidecar filename must be specified when output file is stdout."
             )
         options.sidecar = options.output_file + '.txt'
+    if options.sidecar == options.input_file or options.sidecar == options.output_file:
+        raise BadArgsError(
+            "--sidecar file must be different from the input and output files"
+        )
 
 
 def check_options_preprocessing(options):
@@ -183,13 +137,13 @@ def check_options_preprocessing(options):
                     options.unpaper_args
                 )
         except Exception as e:
-            raise BadArgsError(str(e))
+            raise BadArgsError("--unpaper-args: " + str(e)) from e
 
 
-def _pages_from_ranges(ranges):
+def _pages_from_ranges(ranges: str) -> Set[int]:
     if is_iterable_notstr(ranges):
         return set(ranges)
-    pages = []
+    pages: List[int] = []
     page_groups = ranges.replace(' ', '').split(',')
     for g in page_groups:
         if not g:
@@ -200,9 +154,18 @@ def _pages_from_ranges(ranges):
             pages.append(int(g) - 1)
         else:
             try:
-                pages.extend(range(int(start) - 1, int(end)))
+                new_pages = list(range(int(start) - 1, int(end)))
+                if not new_pages:
+                    raise BadArgsError(f"invalid page subrange '{start}-{end}'")
+                pages.extend(new_pages)
             except ValueError:
-                raise BadArgsError("invalid page range")
+                raise BadArgsError("invalid page range") from None
+
+    if not pages:
+        raise BadArgsError(
+            f"The string of page ranges '{ranges}' did not contain any recognizable "
+            f"page ranges."
+        )
 
     if not monotonic(pages):
         log.warning(
@@ -225,8 +188,6 @@ def check_options_ocr_behavior(options):
     )
     if exclusive_options >= 2:
         raise BadArgsError("Choose only one of --force-ocr, --skip-text, --redo-ocr.")
-    if options.pages and options.sidecar:
-        raise BadArgsError("--pages and --sidecar are mutually exclusive")
     if options.pages:
         options.pages = _pages_from_ranges(options.pages)
 
@@ -263,25 +224,16 @@ def check_options_optimizing(options):
 
 
 def check_options_advanced(options):
-    if options.pdfa_image_compression != 'auto' and options.output_type.startswith(
+    if options.pdfa_image_compression != 'auto' and not options.output_type.startswith(
         'pdfa'
     ):
         log.warning(
-            "--pdfa-image-compression argument has no effect when "
-            "--output-type is not 'pdfa', 'pdfa-1', or 'pdfa-2'"
-        )
-    if not tesseract.has_user_words(options.tesseract_env) and (
-        options.user_words or options.user_patterns
-    ):
-        log.warning(
-            "Tesseract 4.0 ignores --user-words and --user-patterns, so these "
-            "arguments have no effect."
+            "--pdfa-image-compression argument only applies when "
+            "--output-type is one of 'pdfa', 'pdfa-1', or 'pdfa-2'"
         )
 
 
 def check_options_metadata(options):
-    import unicodedata
-
     docinfo = [options.title, options.author, options.keywords, options.subject]
     for s in (m for m in docinfo if m):
         for c in s:
@@ -300,9 +252,9 @@ def check_options_pillow(options):
         PIL.Image.MAX_IMAGE_PIXELS = None
 
 
-def check_options(options):
+def _check_options(options, plugin_manager, ocr_engine_languages):
     check_platform()
-    check_options_languages(options)
+    check_options_languages(options, ocr_engine_languages)
     check_options_metadata(options)
     check_options_output(options)
     check_options_sidecar(options)
@@ -311,7 +263,12 @@ def check_options(options):
     check_options_optimizing(options)
     check_options_advanced(options)
     check_options_pillow(options)
-    check_dependency_versions(options)
+    plugin_manager.hook.check_options(options=options)
+
+
+def check_options(options, plugin_manager):
+    ocr_engine_languages = plugin_manager.hook.get_ocr_engine().languages(options)
+    _check_options(options, plugin_manager, ocr_engine_languages)
 
 
 def check_closed_streams(options):  # pragma: no cover
@@ -362,28 +319,25 @@ def check_closed_streams(options):  # pragma: no cover
     return True
 
 
-def log_page_orientations(pdfinfo):
-    direction = {0: 'n', 90: 'e', 180: 's', 270: 'w'}
-    orientations = []
-    for n, page in enumerate(pdfinfo):
-        angle = page.rotation or 0
-        if angle != 0:
-            orientations.append('{0}{1}'.format(n + 1, direction.get(angle, '')))
-    if orientations:
-        log.info('Page orientations detected: %s', ' '.join(orientations))
-
-
-def create_input_file(options, work_folder):
+def create_input_file(options, work_folder: Path) -> Tuple[Path, str]:
     if options.input_file == '-':
         # stdin
         log.info('reading file from standard input')
-        target = os.path.join(work_folder, 'stdin')
+        target = work_folder / 'stdin'
         with open(target, 'wb') as stream_buffer:
             copyfileobj(sys.stdin.buffer, stream_buffer)
-        return target, "<stdin>"
+        return target, "stdin"
+    elif hasattr(options.input_file, 'readable'):
+        if not options.input_file.readable():
+            raise InputFileError("Input file stream is not readable")
+        log.info('reading file from input stream')
+        target = work_folder / 'stream'
+        with open(target, 'wb') as stream_buffer:
+            copyfileobj(options.input_file, stream_buffer)
+        return target, "stream"
     else:
         try:
-            target = os.path.join(work_folder, 'origin')
+            target = work_folder / 'origin'
             safe_symlink(options.input_file, target)
             return target, os.fspath(options.input_file)
         except FileNotFoundError:
@@ -398,6 +352,9 @@ def check_requested_output_file(options):
                 "is connected to a terminal.  Please redirect stdout to a "
                 "file."
             )
+    elif hasattr(options.output_file, 'writable'):
+        if not options.output_file.writable():
+            raise OutputFileAccessError("Output stream is not writable")
     elif not is_file_writable(options.output_file):
         raise OutputFileAccessError(
             f"Output file location ({options.output_file}) is not a writable file."
@@ -410,8 +367,15 @@ def report_output_file_size(options, input_file, output_file):
         input_size = Path(input_file).stat().st_size
     except FileNotFoundError:
         return  # Outputting to stream or something
+    with pikepdf.open(output_file) as p:
+        # Overhead constants obtained by estimating amount of data added by OCR
+        # PDF/A conversion, and possible XMP metadata addition, with compression
+        FILE_OVERHEAD = 4000
+        OCR_PER_PAGE_OVERHEAD = 3000
+        reasonable_overhead = FILE_OVERHEAD + OCR_PER_PAGE_OVERHEAD * len(p.pages)
     ratio = output_size / input_size
-    if ratio < 1.35 or input_size < 25000:
+    reasonable_ratio = output_size / (input_size + reasonable_overhead)
+    if reasonable_ratio < 1.35 or input_size < 25000:
         return  # Seems fine
 
     reasons = []
@@ -441,6 +405,10 @@ def report_output_file_size(options, input_file, output_file):
                     f"The optional dependency '{name}' was not found, so some image "
                     f"optimizations could not be attempted."
                 )
+    if options.output_type.startswith('pdfa'):
+        reasons.append("PDF/A conversion was enabled. (Try `--output-type pdf`.)")
+    if options.plugins:
+        reasons.append("Plugins were used.")
 
     if reasons:
         explanation = "Possible reasons for this include:\n" + '\n'.join(reasons) + "\n"
@@ -450,32 +418,4 @@ def report_output_file_size(options, input_file, output_file):
     log.warning(
         f"The output file size is {ratio:.2f}× larger than the input file.\n"
         f"{explanation}"
-    )
-
-
-def check_dependency_versions(options):
-    check_external_program(
-        program='tesseract',
-        package={'linux': 'tesseract-ocr'},
-        version_checker=tesseract.version,
-        need_version='4.0.0',  # using backport for Travis CI
-    )
-    check_external_program(
-        program='gs',
-        package='ghostscript',
-        version_checker=ghostscript.version,
-        need_version='9.15',  # limited by Travis CI / Ubuntu 14.04 backports
-    )
-    gs_version = ghostscript.version()
-    if gs_version in ('9.24', '9.51'):
-        raise MissingDependencyError(
-            f"Ghostscript {gs_version} contains serious regressions and is not "
-            "supported. Please upgrade to a newer version, or downgrade to the "
-            "previous version."
-        )
-    check_external_program(
-        program='qpdf',
-        package='qpdf',
-        version_checker=qpdf.version,
-        need_version='8.0.2',
     )

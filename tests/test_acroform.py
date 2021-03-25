@@ -1,19 +1,9 @@
 # © 2019 James R. Barlow: github.com/jbarlow83
 #
-# This file is part of OCRmyPDF.
-#
-# OCRmyPDF is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# OCRmyPDF is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with OCRmyPDF.  If not, see <http://www.gnu.org/licenses/>.
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
 
 import logging
 
@@ -35,8 +25,8 @@ def test_acroform_and_redo(acroform, caplog, no_outpdf):
     assert '--redo-ocr is not currently possible' in caplog.text
 
 
-def test_acroform_message(acroform, caplog, spoof_tesseract_noop, outpdf):
+def test_acroform_message(acroform, caplog, outpdf):
     caplog.set_level(logging.INFO)
-    check_ocrmypdf(acroform, outpdf, env=spoof_tesseract_noop)
+    check_ocrmypdf(acroform, outpdf, '--plugin', 'tests/plugins/tesseract_noop.py')
     assert 'fillable form' in caplog.text
     assert '--force-ocr' in caplog.text
